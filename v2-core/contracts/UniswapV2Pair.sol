@@ -111,21 +111,27 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         (uint112 _reserve0, uint112 _reserve1, ) = getReserves(); // gas savings
         uint balance0 = IERC20(token0).balanceOf(address(this));
         uint balance1 = IERC20(token1).balanceOf(address(this));
+
+        // Calculates the amounts of tokens added to the pool
         uint amount0 = balance0.sub(_reserve0);
         uint amount1 = balance1.sub(_reserve1);
 
         bool feeOn = _mintFee(_reserve0, _reserve1);
         uint _totalSupply = totalSupply; // gas savings, must be defined here since totalSupply can update in _mintFee
         if (_totalSupply == 0) {
+            // NOTE: pool value function f(x, y) = sqrt(xy) = L
             liquidity = Math.sqrt(amount0.mul(amount1)).sub(MINIMUM_LIQUIDITY);
+            // NOTE: protection against vault inflation attack
             _mint(address(0), MINIMUM_LIQUIDITY); // permanently lock the first MINIMUM_LIQUIDITY tokens
         } else {
+            // NOTE: s = min(dx * T / x0, dy * T / y0)
             liquidity = Math.min(amount0.mul(_totalSupply) / _reserve0, amount1.mul(_totalSupply) / _reserve1);
         }
         require(liquidity > 0, 'UniswapV2: INSUFFICIENT_LIQUIDITY_MINTED');
         _mint(to, liquidity);
 
         _update(balance0, balance1, _reserve0, _reserve1);
+        // NOTE: used for protocol fee xy = L^2 or xy = k
         if (feeOn) kLast = uint(reserve0).mul(reserve1); // reserve0 and reserve1 are up-to-date
         emit Mint(msg.sender, amount0, amount1);
     }
@@ -139,8 +145,13 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         uint balance1 = IERC20(_token1).balanceOf(address(this));
         uint liquidity = balanceOf[address(this)];
 
+        // NOTE: protocal fee
         bool feeOn = _mintFee(_reserve0, _reserve1);
         uint _totalSupply = totalSupply; // gas savings, must be defined here since totalSupply can update in _mintFee
+
+        // NOTE:
+        // dx = s * x0 / T
+        // dy = s * y0 / T
         amount0 = liquidity.mul(balance0) / _totalSupply; // using balances ensures pro-rata distribution
         amount1 = liquidity.mul(balance1) / _totalSupply; // using balances ensures pro-rata distribution
         require(amount0 > 0 && amount1 > 0, 'UniswapV2: INSUFFICIENT_LIQUIDITY_BURNED');
@@ -156,6 +167,8 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     }
 
     // this low-level function should be called from a contract which performs important safety checks
+    // NOTE: no amount in for input
+    // NOTE: data used for flash swap
     function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external lock {
         require(amount0Out > 0 || amount1Out > 0, 'UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT');
         // NOTE: internal balance of tokens
@@ -178,13 +191,34 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
             balance0 = IERC20(_token0).balanceOf(address(this));
             balance1 = IERC20(_token1).balanceOf(address(this));
         }
+        // NOTE: calculate amount in
+        // actual balance - (internal balance - amount out)
+        // actual balance = actual balance before transfer - amount out
+        // actual balance > new internal balance ? balance increased -> amount in = actual balance
+        // NOTE example
+        // amount in = token 0, amount out = token 1
+        // amount0Out = 0
+        // amount1Out = 100
+        // amount in = 10 token 0
+        // balance0 = 1010
+        // reserve0 = 1000
+        //                   1010       1010  - 0            1010       1000       - 0 = 10
         uint amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
         uint amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
         require(amount0In > 0 || amount1In > 0, 'UniswapV2: INSUFFICIENT_INPUT_AMOUNT');
         {
             // scope for reserve{0,1}Adjusted, avoids stack too deep errors
+            // NOTE:
+            // amount0In = 0 -> balance0Adjusted = balance0
+            // amount0In > 0 -> balance1Adjusted = balance0 * 1000 - amount0In * 3
+            // balance0Adjusted / 1000 = balance0 - 3 / 1000 * amount0In
             uint balance0Adjusted = balance0.mul(1000).sub(amount0In.mul(3));
             uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
+            // NOTE:
+            // (x0 + dx * (1 - f))(y0 - dy) >= x0 * y0
+            // balance0Adjusted / 1000 * balance1Adjusted / 1000 >= reserve0 * reserve1 =
+            // balance 0 adjusted * balance 1 adjusted
+            //                                         >= reserve 0 * reserve 1 * 1000^2
             require(
                 balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000 ** 2),
                 'UniswapV2: K'
